@@ -1,0 +1,12 @@
+# Node / build artefacts
+node_modules/
+*.log
+*.tsbuildinfo
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
