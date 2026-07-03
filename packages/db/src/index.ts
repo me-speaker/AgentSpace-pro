@@ -5,7 +5,7 @@
 //
 //   import { getDatabase, createWorkflowDefinitionSync, ... } from "@agent-space/db";
 
-export { getDatabase, resetDatabaseForTests, getAppliedSchemaVersion } from "./workflows/database.ts";
+export { getDatabase, resetDatabaseForTests, getAppliedSchemaVersion, withTransaction } from "./workflows/database.ts";
 
 export {
   // Definition CRUD

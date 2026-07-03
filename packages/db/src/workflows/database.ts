@@ -56,3 +56,45 @@ export function resetDatabaseForTests(): void {
 export function getAppliedSchemaVersion(): number {
   return _appliedSchemaVersion;
 }
+
+/**
+ * P0-2 (2026-07-03): atomic transaction wrapper.
+ *
+ * The FSM daemon (handle-workflow-task) writes up to 3 rows per call
+ * (1× history for START, 1× instance update, 1× history for event).
+ * Without a transaction, a failure between the writes leaves the DB
+ * in a half-committed state — the instance row reflects the new state
+ * but the history is missing the event row, or vice versa.
+ *
+ * Usage:
+ *   withTransaction(() => {
+ *     recordWorkflowHistorySync(...);
+ *     updateWorkflowInstanceStateSync(...);
+ *     recordWorkflowHistorySync(...);
+ *   });
+ *
+ * On any throw inside the callback the transaction is ROLLBACK'd and
+ * the original error re-thrown. On success the transaction is
+ * COMMIT'd. All *Sync CRUD functions in this package use the singleton
+ * DB returned by getDatabase(), so they automatically participate in
+ * the open transaction.
+ *
+ * Note: node:sqlite is single-connection, so a nested withTransaction
+ * would conflict with itself. We do NOT support nesting.
+ */
+export function withTransaction<T>(fn: () => T): T {
+  const db = getDatabase();
+  db.exec("BEGIN");
+  try {
+    const result = fn();
+    db.exec("COMMIT");
+    return result;
+  } catch (err) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {
+      // ignore rollback failure (best-effort cleanup)
+    }
+    throw err;
+  }
+}

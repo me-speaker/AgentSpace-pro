@@ -140,6 +140,25 @@ export type WorkflowEvent =
 
 // ── Transition Result ────────────────────────────────────────────────────────
 
+/**
+ * P0-3 (2026-07-03): structured failure reason so the daemon can record
+ * the right eventType in history (instead of conflating every
+ * non-transition as "guard_fail"). Possible values:
+ *   - "no_transition"  : def.transitions is empty / nothing tries to match
+ *   - "no_from_match"  : signal arrived in a state with no transition
+ *                        whose `from` includes the current state
+ *   - "no_event_match" : signal's name doesn't match any transition's event
+ *   - "guard_failed"   : a required guard evaluated to false
+ *   - "error"          : a runtime error (e.g. attempt limit exceeded)
+ *                        halted the step; see `error` for the message
+ */
+export type TransitionFailureReason =
+  | "no_transition"
+  | "no_from_match"
+  | "no_event_match"
+  | "guard_failed"
+  | "error";
+
 export interface TransitionResult {
   /** true = state changed; false = stayed (guards blocked or no matching transition) */
   transitioned: boolean;
@@ -147,6 +166,8 @@ export interface TransitionResult {
   guardsPassed: boolean;
   actionsRun: Array<{ id: string; phase: ActionPhase; ok: boolean; error?: string }>;
   error?: string;
+  /** Set when `transitioned` is false. Undefined when the transition succeeded. */
+  reason?: TransitionFailureReason;
 }
 
 // ── Execution Log (for runtime audit) ───────────────────────────────────────

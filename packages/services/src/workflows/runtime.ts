@@ -137,15 +137,18 @@ function runAction(
   instance: WorkflowInstance
 ): { ok: boolean; error?: string } {
   try {
-    // Placeholder: resolve service path + call with args.
-    // Real implementation resolves via service registry (DI container).
-    void action.service;
-    void action.args;
-    void instance;
-    // const [svc, method] = action.service.split(".");
-    // const fn = serviceRegistry.get(svc)?.[method];
-    // if (!fn) throw new Error(`Service method not found: ${action.service}`);
-    // await fn({ ...instance.context, ...action.args });
+    // P0-1 (2026-07-03): short-term fix so actions actually do something
+    // in tests + e2e. Real action dispatch (DI container + service
+    // registry) is out of scope for L4. For now, any non-empty
+    // `action.args` is shallow-merged into `instance.context` —
+    // matching the "context.set" pattern most workflows use. Mutates
+    // the in-memory instance in place; executeTransition copies it
+    // to a new immutable instance before returning.
+    if (action.args && Object.keys(action.args).length > 0) {
+      for (const [k, v] of Object.entries(action.args)) {
+        instance.context[k] = v;
+      }
+    }
     return { ok: true };
   } catch (err) {
     return { ok: false, error: String(err) };
@@ -194,18 +197,26 @@ export function runPhaseActions(
 }
 
 /**
- * Find the best matching transition for the given event + current state.
- * Matching rules:
- *  1. transition.from includes currentState (or is '*')
- *  2. transition.event matches event.type (or transition.event is undefined for auto)
- *  3. All guards pass
- * Returns null if no transition matches.
+ * P0-3 (2026-07-03): richer result type that distinguishes the four
+ * ways findTransition can fail. Used by executeTransition to populate
+ * TransitionResult.reason so the daemon can record a structured
+ * eventType in history.
  */
-export function findTransition(
+export type FindTransitionOutcome =
+  | { matched: true; transition: WorkflowTransition }
+  | { matched: false; reason: "no_transition" | "no_from_match" | "no_event_match" | "guard_failed"; detail?: string };
+
+/**
+ * Internal: find the best matching transition AND track which case
+ * failed. Public callers should use findTransition() (which wraps this
+ * and returns just the transition or null) unless they need the
+ * reason.
+ */
+function findTransitionWithReason(
   def: WorkflowDefinition,
   instance: WorkflowInstance,
   event: WorkflowEvent
-): WorkflowTransition | null {
+): FindTransitionOutcome {
   // Merge event payload into the context for guard evaluation. This
   // lets a guard reference fields that arrive in the event payload
   // (e.g. `ctx.draftWordCount >= 1000` on a SIGNAL that carries
@@ -224,29 +235,94 @@ export function findTransition(
     : event.type === "TIMEOUT" ? "__timeout"
     : null;
 
+  // Short-circuit on empty transitions.
+  const transitionCount = Object.keys(def.transitions).length;
+  if (transitionCount === 0) {
+    return {
+      matched: false,
+      reason: "no_transition",
+      detail: "definition has no transitions",
+    };
+  }
+
+  let triedFromMatch = false;
+  let triedEventMatch = false;
+  let lastGuardFail: string | undefined;
+
   for (const t of Object.values(def.transitions)) {
     // Check source state match
     const fromStates = Array.isArray(t.from) ? t.from : [t.from];
     const sourceMatch = fromStates.includes("*") || fromStates.includes(instance.currentState);
-    if (!sourceMatch) continue;
+    if (!sourceMatch) {
+      triedFromMatch = true;
+      continue;
+    }
 
     // Check event match
     if (t.kind === "explicit") {
-      if (eventName !== t.event) continue;
+      if (eventName !== t.event) {
+        triedEventMatch = true;
+        continue;
+      }
     } else if (t.kind === "automatic") {
-      // automatic transitions fire on START event only
-      if (event.type !== "START") continue;
+      if (event.type !== "START") {
+        triedEventMatch = true;
+        continue;
+      }
     } else if (t.kind === "callback") {
-      if (event.type !== "CALLBACK" || event.token !== instance.callbackToken) continue;
+      if (event.type !== "CALLBACK" || event.token !== instance.callbackToken) {
+        triedEventMatch = true;
+        continue;
+      }
     }
 
     // Check guards (against the merged context so payload fields are visible).
     const guardResult = evaluateGuards(t, mergedContext);
-    if (!guardResult.passed) continue;
+    if (!guardResult.passed) {
+      lastGuardFail = guardResult.failedGuard;
+      continue;
+    }
 
-    return t;
+    return { matched: true, transition: t };
   }
-  return null;
+
+  // Determine which failure reason to report. Priority: guard > event > from > none.
+  if (lastGuardFail) {
+    return { matched: false, reason: "guard_failed", detail: `guard '${lastGuardFail}' failed` };
+  }
+  if (triedEventMatch) {
+    return {
+      matched: false,
+      reason: "no_event_match",
+      detail: `event '${eventName}' did not match any transition's event in state '${instance.currentState}'`,
+    };
+  }
+  if (triedFromMatch) {
+    return {
+      matched: false,
+      reason: "no_from_match",
+      detail: `state '${instance.currentState}' is not in any transition's 'from' list`,
+    };
+  }
+  return { matched: false, reason: "no_transition" };
+}
+
+/**
+ * Find the best matching transition for the given event + current state.
+ * Matching rules:
+ *  1. transition.from includes currentState (or is '*')
+ *  2. transition.event matches event.type (or transition.event is undefined for auto)
+ *  3. All guards pass
+ * Returns null if no transition matches. Use findTransitionWithReason()
+ * (internal) if you need to know WHY no transition matched.
+ */
+export function findTransition(
+  def: WorkflowDefinition,
+  instance: WorkflowInstance,
+  event: WorkflowEvent
+): WorkflowTransition | null {
+  const outcome = findTransitionWithReason(def, instance, event);
+  return outcome.matched ? outcome.transition : null;
 }
 
 /**
@@ -290,28 +366,34 @@ export function executeTransition(
   const def = definition; // alias for clarity
 
   // Find matching transition
-  const transition = findTransition(def, instance, event);
-
-  // Merged context (event payload overrides existing). Used for the
-  // history entry's guardResults evaluation so the recorded values
-  // match what the runtime actually saw when deciding to fire.
+  // P0-3 (2026-07-03): use the richer outcome to populate result.reason
+  // so the daemon can record a structured eventType in history
+  // (instead of conflating every non-transition as "guard_fail").
+  //
+  // The mergedContext (event payload merged into instance.context) is
+  // also used by the history entry's guardResults, so it's computed
+  // here once and shared with the (no longer used) findTransition
+  // call. P0-3 also re-merged it inside findTransitionWithReason
+  // for guard eval — small duplication, but the data is small.
   const mergedContext: Record<string, unknown> = {
     ...instance.context,
     ...(event.payload ?? {}),
   };
-
-  if (!transition) {
+  const outcome = findTransitionWithReason(def, instance, event);
+  if (!outcome.matched) {
     return {
       instance,
       result: {
         transitioned: false,
         toState: null,
-        guardsPassed: true,
+        guardsPassed: outcome.reason === "guard_failed" ? false : true,
         actionsRun: [],
-        error: `No matching transition for event '${event.type}' in state '${instance.currentState}'`,
+        error: outcome.detail ?? `No matching transition (${outcome.reason})`,
+        reason: outcome.reason,
       },
     };
   }
+  const transition = outcome.transition;
 
   const sourceState = def.states[instance.currentState];
   const targetState = def.states[transition.to];
@@ -353,6 +435,7 @@ export function executeTransition(
         guardsPassed: true,
         actionsRun: allActionResults,
         error: err,
+        reason: "error",
       },
     };
   }
@@ -390,6 +473,7 @@ export function executeTransition(
         guardsPassed: true,
         actionsRun: allActionResults,
         error: errMsg,
+        reason: "error",
       },
     };
   }

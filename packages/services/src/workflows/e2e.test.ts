@@ -286,6 +286,17 @@ test("thesis-36page: full FSM lifecycle from idle to done via daemon + direct ex
   assert.equal(r3.currentState, "outline");
   assert.equal(r3.historyCount, 1, "one history row from the daemon's fire");
 
+  // P0-1 (2026-07-03): verify that action.args are actually merged
+  // into instance.context. The t1 transition defines a_outline with
+  // args: { outline: "5-chapter skeleton" }; before P0-1, runAction
+  // was a no-op stub and this field would be missing.
+  const afterR3 = readWorkflowInstanceSync(instRecord.id)!;
+  assert.equal(
+    afterR3.contextJson.outline,
+    "5-chapter skeleton",
+    "P0-1: action args merged into context",
+  );
+
   // ── Step 4: handleWorkflowTask advances outline → draft ───────────────
   const r4 = handleWorkflowTask({
     workspaceId: WS_E2E,
@@ -360,4 +371,138 @@ test("thesis-36page: full FSM lifecycle from idle to done via daemon + direct ex
   const finalInst = readWorkflowInstanceSync(instRecord.id);
   assert.equal(finalInst?.currentState, "done");
   assert.equal(finalInst?.status, "completed", "terminal state promoted to completed");
+});
+
+// ── P0-3 verification: guard denial produces structured eventType ────────────
+
+test("guard denial: submit_review with draftWordCount < 1000 records guard_failed (P0-3)", () => {
+  // Fresh definition + instance (test.beforeEach already resets the DB
+  // singleton, and we use the file-based e2e.db so other test files
+  // don't interfere).
+  const def: WorkflowDefinition = {
+    id: "guard-test",
+    version: "1.0.0",
+    label: "Guard denial test",
+    initialState: "draft",
+    states: {
+      draft: { id: "draft", label: "Draft" },
+      review: { id: "review", label: "Review" },
+    },
+    transitions: {
+      t: {
+        id: "t",
+        from: "draft",
+        to: "review",
+        kind: "explicit",
+        event: "submit_review",
+        guards: [
+          {
+            id: "g_word_count",
+            label: "min 1000 words",
+            condition: "ctx.draftWordCount >= 1000",
+            required: true,
+          },
+        ],
+      },
+    },
+  };
+
+  const defRecord = createWorkflowDefinitionSync({
+    workspaceId: WS_E2E,
+    name: "guard-test",
+    version: 1,
+    definitionJson: def as unknown as Record<string, unknown>,
+  });
+  const instRecord = createWorkflowInstanceSync({
+    workspaceId: WS_E2E,
+    definitionId: defRecord.id,
+    currentState: "draft",
+    contextJson: {},
+  });
+
+  // Fire a SIGNAL that fails the guard (500 < 1000).
+  const r = handleWorkflowTask({
+    workspaceId: WS_E2E,
+    definitionId: defRecord.id,
+    instanceId: instRecord.id,
+    event: { type: "SIGNAL", signal: "submit_review", payload: { draftWordCount: 500 } },
+  });
+
+  // Result: no transition, instance stays at draft.
+  assert.equal(r.transitioned, false);
+  assert.equal(r.currentState, "draft", "instance must not advance on guard fail");
+  assert.equal(r.status, "active");
+
+  // History: exactly one row, with the structured P0-3 eventType.
+  // (No START row because createdHere is false — we created the
+  // instance via createWorkflowInstanceSync directly.)
+  const hist = listWorkflowHistorySync(instRecord.id);
+  assert.equal(hist.length, 1, "one history row from the guard denial");
+  assert.equal(
+    hist[0].eventType,
+    "guard_failed",
+    "P0-3: structured eventType replaces the old 'guard_fail' catch-all",
+  );
+  // payloadJson should include the structured reason + the original event
+  assert.equal(hist[0].payloadJson.reason, "guard_failed");
+  // The original SIGNAL is captured for debugging.
+  assert.ok(hist[0].payloadJson.event);
+
+  // Confirm the DB instance was NOT advanced.
+  const after = readWorkflowInstanceSync(instRecord.id)!;
+  assert.equal(after.currentState, "draft");
+  assert.equal(after.status, "active");
+});
+
+// ── P0-3 verification: wrong-state signal produces no_from_match eventType ───
+
+test("no matching transition: signal in wrong state records no_from_match (P0-3)", () => {
+  const def: WorkflowDefinition = {
+    id: "no-match-test",
+    version: "1.0.0",
+    label: "No-match test",
+    initialState: "idle",
+    states: {
+      idle: { id: "idle", label: "Idle" },
+      done: { id: "done", label: "Done" },
+    },
+    transitions: {
+      t1: {
+        id: "t1",
+        from: "idle",
+        to: "done",
+        kind: "explicit",
+        event: "finish",
+      },
+    },
+  };
+  const defRecord = createWorkflowDefinitionSync({
+    workspaceId: WS_E2E,
+    name: "no-match-test",
+    version: 1,
+    definitionJson: def as unknown as Record<string, unknown>,
+  });
+  // Instance is at "done" (terminal), but the only transition fires
+  // from "idle". So any SIGNAL we send will produce no_from_match.
+  const instRecord = createWorkflowInstanceSync({
+    workspaceId: WS_E2E,
+    definitionId: defRecord.id,
+    currentState: "done",
+    contextJson: {},
+  });
+
+  const r = handleWorkflowTask({
+    workspaceId: WS_E2E,
+    definitionId: defRecord.id,
+    instanceId: instRecord.id,
+    event: { type: "SIGNAL", signal: "finish" },
+  });
+  assert.equal(r.transitioned, false);
+  const hist = listWorkflowHistorySync(instRecord.id);
+  assert.equal(hist.length, 1);
+  assert.equal(
+    hist[0].eventType,
+    "no_from_match",
+    "P0-3: distinguishes 'wrong state' from 'wrong event name' from 'guard failed'",
+  );
 });

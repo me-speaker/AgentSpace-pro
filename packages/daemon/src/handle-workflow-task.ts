@@ -32,6 +32,7 @@ import {
   updateWorkflowInstanceStateSync,
   recordWorkflowHistorySync,
   listWorkflowHistorySync,
+  withTransaction,
   type WorkflowInstanceRecord,
 } from "@agent-space/db";
 import { executeTransition } from "@agent-space/services";
@@ -227,63 +228,75 @@ export function handleWorkflowTask(
   );
 
   // 5. Persist results.
-  //    When we created the instance in this call, also record a START
-  //    history row before the event row — that gives us START + event
-  //    = 2 rows for a fresh transition (matches the L4.1 spec).
-  if (createdHere) {
-    recordWorkflowHistorySync({
-      workspaceId: input.workspaceId,
-      instanceId: instRecord.id,
-      eventType: "START",
-      fromState: null,
-      toState: def.initialState,
-      payloadJson: { inputJson: input.inputJson ?? {} },
-    });
-  }
-  if (result.transitioned) {
-    let dbStatus = toStoreStatus(nextInst.status);
-    if (isTerminalState(def, nextInst.currentState)) {
-      dbStatus = "completed";
+  //    P0-2: wrap the writes in a transaction so a failure in one
+  //    row doesn't leave the DB half-updated. All *Sync CRUD in
+  //    @agent-space/db goes through the singleton connection, so a
+  //    single withTransaction() covers all of them.
+  //    P0-3: when result.transitioned is false, use result.reason
+  //    (structured by the runtime's findTransitionWithReason) as the
+  //    history eventType so callers can distinguish "guard failed"
+  //    from "wrong state" from "wrong event name".
+  withTransaction(() => {
+    if (createdHere) {
+      recordWorkflowHistorySync({
+        workspaceId: input.workspaceId,
+        instanceId: instRecord.id,
+        eventType: "START",
+        fromState: null,
+        toState: def.initialState,
+        payloadJson: { inputJson: input.inputJson ?? {} },
+      });
     }
-    const attemptCount = Object.values(nextInst.attempts).reduce(
-      (sum, n) => sum + n,
-      0,
-    );
-    updateWorkflowInstanceStateSync(instRecord.id, {
-      status: dbStatus,
-      currentState: nextInst.currentState,
-      contextJson: nextInst.context,
-      attemptCount,
-    });
-    const lastHistory = nextInst.history[nextInst.history.length - 1];
-    const eventLabel = input.event.signal ?? input.event.type;
-    recordWorkflowHistorySync({
-      workspaceId: input.workspaceId,
-      instanceId: instRecord.id,
-      eventType: eventLabel,
-      fromState: lastHistory?.fromState ?? null,
-      toState: lastHistory?.toState ?? nextInst.currentState,
-      payloadJson: {
-        transitionId: lastHistory?.transitionId ?? null,
-        guardResults: lastHistory?.guardResults ?? {},
-        actionResults: lastHistory?.actionResults ?? {},
-      },
-    });
-  } else {
-    // No matching transition (which includes "guard denied" — the
-    // runtime's findTransition() returns null when guards fail).
-    recordWorkflowHistorySync({
-      workspaceId: input.workspaceId,
-      instanceId: instRecord.id,
-      eventType: "guard_fail",
-      fromState: runtimeInst.currentState,
-      toState: null,
-      payloadJson: {
-        event: input.event,
-        error: result.error ?? "no matching transition",
-      },
-    });
-  }
+    if (result.transitioned) {
+      let dbStatus = toStoreStatus(nextInst.status);
+      if (isTerminalState(def, nextInst.currentState)) {
+        dbStatus = "completed";
+      }
+      const attemptCount = Object.values(nextInst.attempts).reduce(
+        (sum, n) => sum + n,
+        0,
+      );
+      updateWorkflowInstanceStateSync(instRecord.id, {
+        status: dbStatus,
+        currentState: nextInst.currentState,
+        contextJson: nextInst.context,
+        attemptCount,
+      });
+      const lastHistory = nextInst.history[nextInst.history.length - 1];
+      const eventLabel = input.event.signal ?? input.event.type;
+      recordWorkflowHistorySync({
+        workspaceId: input.workspaceId,
+        instanceId: instRecord.id,
+        eventType: eventLabel,
+        fromState: lastHistory?.fromState ?? null,
+        toState: lastHistory?.toState ?? nextInst.currentState,
+        payloadJson: {
+          transitionId: lastHistory?.transitionId ?? null,
+          guardResults: lastHistory?.guardResults ?? {},
+          actionResults: lastHistory?.actionResults ?? {},
+        },
+      });
+    } else {
+      // No matching transition. The runtime tells us WHY via result.reason
+      // (one of: "no_transition" | "no_from_match" | "no_event_match" |
+      // "guard_failed" | "error"). Fall back to "no_transition" if the
+      // runtime didn't set a reason (shouldn't happen in L4.1+ but
+      // defensive).
+      const eventType = result.reason ?? "no_transition";
+      recordWorkflowHistorySync({
+        workspaceId: input.workspaceId,
+        instanceId: instRecord.id,
+        eventType,
+        fromState: runtimeInst.currentState,
+        toState: null,
+        payloadJson: {
+          event: input.event,
+          reason: result.reason,
+          error: result.error ?? "no matching transition",
+        },
+      });
+    }
+  });
 
   // 6. Re-read and return the final state.
   const finalRecord = readWorkflowInstanceSync(instRecord.id)!;

@@ -5,7 +5,10 @@
 //      advances, history has 2 records (START recorded by create + the
 //      SIGNAL recorded by executeTransition).
 //   2. guard denied: definition with a guard, guard fails, instance
-//      stays at initial state, history records a `guard_fail` event.
+//      stays at initial state, history records a `guard_failed` event.
+//      (P0-3 2026-07-03: eventType renamed from "guard_fail" to
+//      "guard_failed" so it's consistent with TransitionFailureReason
+//      in @agent-space/domain.)
 //   3. workspace isolation: workspace A's definition/instance cannot
 //      be touched from workspace B.
 //
@@ -122,7 +125,7 @@ test("happy path: definition with 1 transition, fire event, instance advances, h
 
 // ── Test 2: Guard denied ─────────────────────────────────────────────────────
 
-test("guard denied: required guard fails, instance stays, history records guard_fail", () => {
+test("guard denied: required guard fails, instance stays, history records guard_failed", () => {
   const WS = "ws_guard";
   const defId = seedDefinition(WS, "guarded", {
     initialState: "idle",
@@ -161,7 +164,7 @@ test("guard denied: required guard fails, instance stays, history records guard_
   assert.equal(result.currentState, "idle");
   assert.equal(result.status, "active");
   assert.equal(result.transitioned, false);
-  // START (from create) + guard_fail (from blocked event) = 2 rows.
+  // START (from create) + guard_failed (from blocked event) = 2 rows.
   assert.equal(result.historyCount, 2);
 
   // The stored instance still has the initial context.
@@ -169,13 +172,13 @@ test("guard denied: required guard fails, instance stays, history records guard_
   assert.equal(stored?.currentState, "idle");
   assert.deepEqual(stored?.contextJson, { ready: false });
 
-  // The history contains START then guard_fail.
+  // The history contains START then guard_failed.
   const hist = getHistory(result.instanceId);
   assert.equal(hist.length, 2);
   assert.equal(hist[0].event_type, "START");
   assert.equal(hist[0].from_state, null);
   assert.equal(hist[0].to_state, "idle");
-  assert.equal(hist[1].event_type, "guard_fail");
+  assert.equal(hist[1].event_type, "guard_failed");
   assert.equal(hist[1].from_state, "idle");
   assert.equal(hist[1].to_state, null);
 });

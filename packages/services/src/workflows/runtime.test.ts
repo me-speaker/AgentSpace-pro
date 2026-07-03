@@ -139,7 +139,12 @@ test("executeTransition — guards block transition", () => {
 
   assert.equal(result.transitioned, false);
   assert.equal(inst2.currentState, "idle");
-  assert.ok(result.error?.includes("No matching transition"));
+  // P0-3 (2026-07-03): error message now includes the structured
+  // reason "guard 'g1' failed" (was previously "No matching transition
+  // for event 'SIGNAL' in state 'idle'"). The detail field is set
+  // by findTransitionWithReason when a guard is the cause.
+  assert.ok(result.error?.includes("guard 'g1' failed"));
+  assert.equal(result.reason, "guard_failed");
 });
 
 test("executeTransition — optional guard (required=false) allows transition", () => {
