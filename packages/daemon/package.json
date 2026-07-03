@@ -1,0 +1,15 @@
+{
+  "name": "@agent-space/daemon-test",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@agent-space/db": "0.0.0",
+    "@agent-space/services": "0.0.0",
+    "@agent-space/domain": "0.0.0"
+  }
+}
