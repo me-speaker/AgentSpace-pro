@@ -45,3 +45,21 @@ export type {
   // store interface
   WorkflowStore,
 } from "./workflows/store.ts";
+
+// ── Scheduler (L4.2) ────────────────────────────────────────────────────────
+
+export {
+  startScheduler,
+  stopScheduler,
+  isSchedulerRunning,
+  tick,
+  registerScheduledWorkflow,
+  unregisterScheduledWorkflow,
+  listScheduledWorkflows,
+  getScheduledWorkflow,
+  clearScheduledWorkflows,
+  parseCronExpr,
+  isCronDue,
+} from "./schedules/scheduler.ts";
+
+export type { ScheduledWorkflow } from "./schedules/scheduler.ts";
