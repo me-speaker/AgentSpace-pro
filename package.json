@@ -1,0 +1,15 @@
+{
+  "name": "agent-space-test",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "test:persistence": "node --experimental-strip-types --test packages/services/src/workflows/persistence.test.ts",
+    "test:runtime": "node --experimental-strip-types --test packages/services/src/workflows/runtime.test.ts",
+    "test:store": "node --experimental-strip-types --test packages/services/src/workflows/store.test.ts",
+    "test:all": "node --experimental-strip-types --test packages/services/src/workflows/persistence.test.ts packages/services/src/workflows/store.test.ts packages/services/src/workflows/runtime.test.ts"
+  }
+}

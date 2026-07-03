@@ -1,0 +1,12 @@
+{
+  "name": "@agent-space/db",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./workflows/store": "./src/workflows/store.ts",
+    "./workflows/schema": "./src/workflows/schema.ts"
+  }
+}
