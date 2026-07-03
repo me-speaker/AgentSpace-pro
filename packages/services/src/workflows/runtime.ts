@@ -206,6 +206,17 @@ export function findTransition(
   instance: WorkflowInstance,
   event: WorkflowEvent
 ): WorkflowTransition | null {
+  // Merge event payload into the context for guard evaluation. This
+  // lets a guard reference fields that arrive in the event payload
+  // (e.g. `ctx.draftWordCount >= 1000` on a SIGNAL that carries
+  // { draftWordCount: 1500 } in its payload). Without this merge,
+  // guards would always see the pre-event context and could never
+  // gate on payload fields.
+  const mergedContext: Record<string, unknown> = {
+    ...instance.context,
+    ...(event.payload ?? {}),
+  };
+
   const eventName = event.type === "SIGNAL" ? event.signal
     : event.type === "CALLBACK" ? "__callback"
     : event.type === "ERROR" ? "__error"
@@ -229,8 +240,8 @@ export function findTransition(
       if (event.type !== "CALLBACK" || event.token !== instance.callbackToken) continue;
     }
 
-    // Check guards
-    const guardResult = evaluateGuards(t, instance.context);
+    // Check guards (against the merged context so payload fields are visible).
+    const guardResult = evaluateGuards(t, mergedContext);
     if (!guardResult.passed) continue;
 
     return t;
@@ -280,6 +291,14 @@ export function executeTransition(
 
   // Find matching transition
   const transition = findTransition(def, instance, event);
+
+  // Merged context (event payload overrides existing). Used for the
+  // history entry's guardResults evaluation so the recorded values
+  // match what the runtime actually saw when deciding to fire.
+  const mergedContext: Record<string, unknown> = {
+    ...instance.context,
+    ...(event.payload ?? {}),
+  };
 
   if (!transition) {
     return {
@@ -352,7 +371,7 @@ export function executeTransition(
       transitionId: transition.id,
       eventName: event.type,
       guardResults: Object.fromEntries(
-        (transition.guards ?? []).map((g) => [g.id, evalGuard(g, instance.context)])
+        (transition.guards ?? []).map((g) => [g.id, evalGuard(g, mergedContext)])
       ),
       actionResults: Object.fromEntries(allActionResults.map((r) => [r.id, r.ok ? "ok" : "error"])),
       error: errMsg,
@@ -384,7 +403,7 @@ export function executeTransition(
     transitionId: transition.id,
     eventName: event.type,
     guardResults: Object.fromEntries(
-      (transition.guards ?? []).map((g) => [g.id, evalGuard(g, instance.context)])
+      (transition.guards ?? []).map((g) => [g.id, evalGuard(g, mergedContext)])
     ),
     actionResults: Object.fromEntries(allActionResults.map((r) => [r.id, r.ok ? "ok" : "error"])),
   };
