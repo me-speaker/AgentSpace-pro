@@ -1,0 +1,13 @@
+{
+  "name": "agent-space-cli-test",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "L4.4 — minimal CLI scaffold for /workflow subcommands (list, show, create, advance, history). Runs directly via node --experimental-strip-types, no transpile step.",
+  "bin": {
+    "agent-space-workflow-test": "./src/bin.ts"
+  },
+  "scripts": {
+    "test:cli": "node --experimental-strip-types --test src/workflow.test.ts"
+  }
+}

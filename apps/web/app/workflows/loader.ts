@@ -171,7 +171,10 @@ export function advanceInstance(
 
   withTransaction(() => {
     if (result.transitioned) {
-      const dbStatus = toStoreStatus(nextInst.status);
+      let dbStatus = toStoreStatus(nextInst.status);
+      if (isTerminalState(def, nextInst.currentState)) {
+        dbStatus = "completed";
+      }
       const attemptCount = Object.values(nextInst.attempts).reduce(
         (sum, n) => sum + n,
         0,
@@ -230,6 +233,23 @@ export function advanceInstance(
 }
 
 // ── Internal helpers (kept inline; not exported) ────────────────────────────
+
+/** Mirror of the daemon's terminal-state check. See
+ *  packages/daemon/src/handle-workflow-task.ts. */
+function isTerminalState(def: WorkflowDefinition, stateId: string): boolean {
+  const state = def.states[stateId];
+  if (!state) return false;
+  if (state.awaitingCallback) return false;
+  if (def.errorState && state.id === def.errorState) return false;
+  if (def.timeoutState && state.id === def.timeoutState) return false;
+  for (const t of Object.values(def.transitions)) {
+    const fromStates = Array.isArray(t.from) ? t.from : [t.from];
+    if (fromStates.includes(stateId) || fromStates.includes("*")) {
+      return false;
+    }
+  }
+  return true;
+}
 
 function toStoreStatus(
   runtimeStatus: string,
