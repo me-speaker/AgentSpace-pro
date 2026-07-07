@@ -1,0 +1,10 @@
+{
+  "name": "agent-space-web-test",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "L4.3 — minimal Next.js 15 scaffold for /workflows pages. Server Components + server actions. Uses @agent-space/db and @agent-space/daemon-test symlinks (no react/next installed in this test repo — see README).",
+  "scripts": {
+    "test:web": "node --experimental-strip-types --test app/workflows/__tests__/actions.test.ts app/workflows/__tests__/page.test.ts"
+  }
+}
