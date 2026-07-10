@@ -328,8 +328,12 @@ test("isCronDue: first call (lastFiredAt=null) always fires", () => {
 
 test("isCronDue: same minute as last fire → does not fire (every-minute)", () => {
   const parsed = parseCronExpr("* * * * *");
-  const now = new Date();
-  const lastFiredAt = new Date(now.getTime() - 1000).toISOString();
+  // Use fixed timestamps so this test doesn't race against a minute
+  // boundary (which made it flaky under slow test runners like
+  // --experimental-test-coverage). last at 14:30:05, now at 14:30:15
+  // — same minute, same hour, same day → no re-fire.
+  const now = new Date(2026, 6, 10, 14, 30, 15);
+  const lastFiredAt = new Date(2026, 6, 10, 14, 30, 5).toISOString();
   assert.equal(isCronDue(parsed, lastFiredAt, now), false);
 });
 
