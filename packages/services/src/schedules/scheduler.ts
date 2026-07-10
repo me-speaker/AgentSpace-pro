@@ -1,4 +1,4 @@
-// FSM L4.2 — Workflow Scheduler
+// FSM P2-1 — Workflow Scheduler (full 5-field cron)
 //
 // setInterval-driven scheduler that ticks every N ms (default 1000,
 // configurable via `SCHEDULER_TICK_MS` env var or `startScheduler({...})`)
@@ -9,12 +9,30 @@
 // initialState (handleWorkflowTask's "spawn only" path — no event is
 // passed in this L4.2 design).
 //
-// Cron support: minimal — only "* * * * *" and "*<slash>N * * * *" patterns.
-//   "* * * * *"        → fire on every minute change
-//   "*<slash>N * * * *" → fire every N minutes (when currentMinute % N === 0)
+// Cron support: full 5-field expressions. Each field accepts:
+//   "*"          wildcard (matches every value in range)
+//   "N"          exact value (e.g. "5")
+//   "N-M"        range (inclusive, e.g. "1-5")
+//   "*/N"        step from min to max (e.g. "*/15" on minute = 0,15,30,45)
+//   "N,M,K,..."  list (e.g. "1,3,5")
+// Fields:
+//   minute        0-59
+//   hour          0-23
+//   day-of-month  1-31
+//   month         1-12
+//   day-of-week   0-6 (Sunday = 0)
 //
-// All other cron patterns throw on registration, so misconfigurations
-// surface immediately rather than silently failing.
+// Examples:
+//   "* * * * *"           every minute
+//   "*/15 * * * *"        every 15 minutes
+//   "30 14 * * *"         every day at 14:30
+//   "0 9 * * 1-5"         Mon-Fri at 09:00
+//   "0,15,30,45 * * * *"  every quarter-hour (explicit list)
+//   "0 0 1 * *"           first day of each month at 00:00
+//
+// All non-`*` field values must be in their natural range; reversed ranges
+// ("5-3"), out-of-range values, step=0, and missing fields all throw so
+// misconfigurations surface immediately at registration.
 
 import { handleWorkflowTask } from "@agent-space/daemon-test";
 import {
@@ -38,53 +56,188 @@ export {
 };
 export type { ScheduledWorkflow };
 
-// ── Cron parser ──────────────────────────────────────────────────────────────
+// ── Cron types & parser ────────────────────────────────────────────
 
-type MinutePattern = "*" | { every: number };
+/**
+ * Per-field representation. `all: true` means "*" (every value matches).
+ * `values` is the pre-expanded set of allowed values for that field —
+ * set construction happens once at parse time, not on every due-check.
+ */
+export type CronField = { all: true } | { values: Set<number> };
 
-interface ParsedCron {
-  minutePattern: MinutePattern;
+export interface ParsedCron {
+  minute: CronField;
+  hour: CronField;
+  dayOfMonth: CronField;
+  month: CronField;
+  dayOfWeek: CronField;
 }
 
+/** Field bounds, indexed by position in the cron expression. */
+const FIELD_BOUNDS: ReadonlyArray<{ name: string; min: number; max: number }> = [
+  { name: "minute", min: 0, max: 59 },
+  { name: "hour", min: 0, max: 23 },
+  { name: "day-of-month", min: 1, max: 31 },
+  { name: "month", min: 1, max: 12 },
+  { name: "day-of-week", min: 0, max: 6 },
+];
+
+/**
+ * Parse a 5-field cron expression. Supports the full POSIX-ish syntax
+ * documented at the top of the file. Throws on any structural problem;
+ * the scheduler hooks catch and skip, so a bad cron never crashes the
+ * tick loop, but `registerScheduledWorkflow` callers should treat a
+ * throw as a registration failure.
+ */
 export function parseCronExpr(expr: string): ParsedCron {
   const parts = expr.trim().split(/\s+/);
   if (parts.length !== 5) {
     throw new Error(
-      `Invalid cron expression: ${expr} (expected 5 fields, got ${parts.length})`,
+      `Invalid cron expression: ${JSON.stringify(expr)} (expected 5 fields, got ${parts.length})`,
     );
   }
-  const [minute, hour, dom, month, dow] = parts;
-  if (hour !== "*" || dom !== "*" || month !== "*" || dow !== "*") {
-    throw new Error(
-      `Unsupported cron expression: ${expr} — only "* * * * *" and "*<slash>N * * * *" are supported`,
-    );
-  }
-  if (minute === "*") {
-    return { minutePattern: "*" };
-  }
-  const m = minute.match(/^\*\/(\d+)$/);
-  if (m) {
-    const n = parseInt(m[1], 10);
-    if (Number.isNaN(n) || n < 1 || n > 59) {
+  return {
+    minute: parseField(parts[0], FIELD_BOUNDS[0]),
+    hour: parseField(parts[1], FIELD_BOUNDS[1]),
+    dayOfMonth: parseField(parts[2], FIELD_BOUNDS[2]),
+    month: parseField(parts[3], FIELD_BOUNDS[3]),
+    dayOfWeek: parseField(parts[4], FIELD_BOUNDS[4]),
+  };
+}
+
+function parseField(
+  token: string,
+  bounds: { name: string; min: number; max: number },
+): CronField {
+  if (token === "*") return { all: true };
+  const values = new Set<number>();
+  for (const part of token.split(",")) {
+    if (part === "") {
       throw new Error(
-        `Invalid star-slash-N value in cron: ${m[1]} (must be 1-59)`,
+        `Empty list item in ${bounds.name} token: ${JSON.stringify(token)}`,
       );
     }
-    return { minutePattern: { every: n } };
+    if (part.includes("/")) {
+      addStep(values, part, bounds);
+    } else if (part.includes("-")) {
+      addRange(values, part, bounds);
+    } else {
+      const n = parseInt(part, 10);
+      if (Number.isNaN(n) || n < bounds.min || n > bounds.max) {
+        throw new Error(
+          `Value ${JSON.stringify(part)} out of bounds [${bounds.min}-${bounds.max}] in ${bounds.name} token: ${JSON.stringify(token)}`,
+        );
+      }
+      values.add(n);
+    }
   }
-  throw new Error(
-    `Unsupported minute pattern: ${minute} (only "*" and "*<slash>N" are supported)`,
+  return { values };
+}
+
+function addRange(
+  values: Set<number>,
+  part: string,
+  bounds: { name: string; min: number; max: number },
+): void {
+  const dashIdx = part.indexOf("-");
+  if (dashIdx === -1) {
+    throw new Error(`Range "${part}" is missing dash in ${bounds.name}`);
+  }
+  const sStr = part.slice(0, dashIdx);
+  const eStr = part.slice(dashIdx + 1);
+  const s = parseInt(sStr, 10);
+  const e = parseInt(eStr, 10);
+  if (Number.isNaN(s) || Number.isNaN(e)) {
+    throw new Error(
+      `Invalid range "${part}" in ${bounds.name} (non-numeric bound)`,
+    );
+  }
+  if (s > e) {
+    throw new Error(
+      `Reversed range "${part}" in ${bounds.name} (start ${s} > end ${e})`,
+    );
+  }
+  if (s < bounds.min || e > bounds.max) {
+    throw new Error(
+      `Range ${s}-${e} out of bounds [${bounds.min}-${bounds.max}] in ${bounds.name}`,
+    );
+  }
+  for (let i = s; i <= e; i++) values.add(i);
+}
+
+function addStep(
+  values: Set<number>,
+  part: string,
+  bounds: { name: string; min: number; max: number },
+): void {
+  const slashIdx = part.indexOf("/");
+  if (slashIdx === -1) {
+    throw new Error(`Step "${part}" is missing slash in ${bounds.name}`);
+  }
+  const rangeStr = part.slice(0, slashIdx);
+  const stepStr = part.slice(slashIdx + 1);
+  const step = parseInt(stepStr, 10);
+  if (Number.isNaN(step) || step < 1) {
+    throw new Error(
+      `Invalid step "${stepStr}" in ${bounds.name} (must be >= 1)`,
+    );
+  }
+  let start: number;
+  let end: number;
+  if (rangeStr === "*") {
+    start = bounds.min;
+    end = bounds.max;
+  } else if (rangeStr.includes("-")) {
+    const dashIdx = rangeStr.indexOf("-");
+    const s = parseInt(rangeStr.slice(0, dashIdx), 10);
+    const e = parseInt(rangeStr.slice(dashIdx + 1), 10);
+    if (Number.isNaN(s) || Number.isNaN(e)) {
+      throw new Error(
+        `Invalid range "${rangeStr}" in step "${part}" in ${bounds.name}`,
+      );
+    }
+    if (s > e) {
+      throw new Error(
+        `Reversed range "${rangeStr}" in step "${part}" in ${bounds.name} (start ${s} > end ${e})`,
+      );
+    }
+    if (s < bounds.min || e > bounds.max) {
+      throw new Error(
+        `Range ${s}-${e} out of bounds [${bounds.min}-${bounds.max}] in step "${part}" in ${bounds.name}`,
+      );
+    }
+    start = s;
+    end = e;
+  } else {
+    throw new Error(
+      `Step "${part}" must use "*" or "N-M" form, not "${rangeStr}", in ${bounds.name}`,
+    );
+  }
+  for (let i = start; i <= end; i += step) values.add(i);
+}
+
+function matchesField(field: CronField, value: number): boolean {
+  if (field.all) return true;
+  return field.values.has(value);
+}
+
+function matchesAllFields(parsed: ParsedCron, d: Date): boolean {
+  return (
+    matchesField(parsed.minute, d.getMinutes()) &&
+    matchesField(parsed.hour, d.getHours()) &&
+    matchesField(parsed.dayOfMonth, d.getDate()) &&
+    matchesField(parsed.month, d.getMonth() + 1) &&
+    matchesField(parsed.dayOfWeek, d.getDay())
   );
 }
 
 /**
  * Decide whether a scheduled workflow is due at `now`, given when it
  * last fired. Returns true on the first call (lastFiredAt === null).
- * For "* * * * *", returns true if the current minute differs from
- * lastFiredAt's minute. For "*<slash>N * * * *", returns true if the
- * current minute is a multiple of N AND the current minute differs
- * from lastFiredAt's minute (so we don't double-fire within the same
- * minute).
+ * Otherwise, all 5 fields must match `now` (cron semantics) AND at
+ * least one field must have advanced since the last fire (to prevent
+ * double-fire when the tick interval is shorter than the cron's
+ * minimum resolution).
  */
 export function isCronDue(
   parsed: ParsedCron,
@@ -93,19 +246,17 @@ export function isCronDue(
 ): boolean {
   if (lastFiredAt === null) return true;
   const last = new Date(lastFiredAt);
-  if (parsed.minutePattern === "*") {
-    return (
-      last.getMinutes() !== now.getMinutes() ||
-      last.getHours() !== now.getHours()
-    );
-  }
-  const every = parsed.minutePattern.every;
-  const nowMinute = now.getMinutes();
-  if (nowMinute % every !== 0) return false;
-  return last.getMinutes() !== nowMinute;
+  if (!matchesAllFields(parsed, now)) return false;
+  return (
+    last.getMinutes() !== now.getMinutes() ||
+    last.getHours() !== now.getHours() ||
+    last.getDate() !== now.getDate() ||
+    last.getMonth() !== now.getMonth() ||
+    last.getDay() !== now.getDay()
+  );
 }
 
-// ── Lifecycle ────────────────────────────────────────────────────────────────
+// ── Lifecycle ────────────────────────────────────────────────
 
 let _intervalId: ReturnType<typeof setInterval> | null = null;
 let _tickIntervalMs = 1000;

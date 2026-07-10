@@ -1,9 +1,13 @@
-// FSM L4.2 — Scheduler unit tests
+// FSM P2-1 — Scheduler unit tests (full 5-field cron)
 //
-// Three scenarios:
+// L4.2 scenarios:
 //   1. Register `* * * * *` workflow → tick 1 time → instance created
 //   2. Register disabled workflow → tick 1 time → no instance
 //   3. Register 2 workflows → tick 1 time → 2 instances created (parallel)
+//
+// P2-1 additions: full cron parser coverage (wildcards, exact, range,
+// step, list) and isCronDue semantics across field resolutions
+// (minute, hour, day, month, day-of-week).
 //
 // We use the in-memory SQLite singleton (`:memory:`) which the DB
 // layer's `resetDatabaseForTests()` clears between tests. The
@@ -11,7 +15,7 @@
 // in beforeEach so tests don't bleed into each other.
 //
 // Run with:
-//   SCHEDULER_TICK_MS=100 node --experimental-strip-types --test \\
+//   SCHEDULER_TICK_MS=100 node --experimental-strip-types --test \
 //       packages/services/src/schedules/scheduler.test.ts
 
 import assert from "node:assert/strict";
@@ -27,11 +31,12 @@ import {
   registerScheduledWorkflow,
   clearScheduledWorkflows,
   tick,
+  parseCronExpr,
+  isCronDue,
   type ScheduledWorkflow,
 } from "./scheduler.ts";
-import { parseCronExpr, isCronDue } from "./scheduler.ts";
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
+// ── Helpers ────────────────────────────────────────────────────────────────
 
 function seedDefinition(
   workspaceId: string,
@@ -180,52 +185,244 @@ test("startScheduler / stopScheduler lifecycle: scheduler ticks repeatedly", asy
   assert.equal(instances[0].currentState, "idle");
 });
 
-// ── Bonus: cron parser edge cases ───────────────────────────────────────────
+// ── L4.2 minimal parser tests (updated to new API) ─────────────────────────
 
-test("parseCronExpr: accepts * * * * * and */N * * * *", () => {
-  const p1 = parseCronExpr("* * * * *");
-  assert.equal(p1.minutePattern, "*");
-
-  const p2 = parseCronExpr("*/2 * * * *");
-  assert.deepEqual(p2.minutePattern, { every: 2 });
-
-  const p3 = parseCronExpr("*/30 * * * *");
-  assert.deepEqual(p3.minutePattern, { every: 30 });
+test("parseCronExpr: accepts * * * * * (all wildcards → all: true fields)", () => {
+  const p = parseCronExpr("* * * * *");
+  assert.deepEqual(p.minute, { all: true });
+  assert.deepEqual(p.hour, { all: true });
+  assert.deepEqual(p.dayOfMonth, { all: true });
+  assert.deepEqual(p.month, { all: true });
+  assert.deepEqual(p.dayOfWeek, { all: true });
 });
 
-test("parseCronExpr: rejects unsupported patterns", () => {
-  assert.throws(() => parseCronExpr("* * *"), /expected 5 fields/);
-  assert.throws(
-    () => parseCronExpr("0 12 * * *"),
-    /only "\* \* \* \* \*" and "\*<slash>N \* \* \* \*" are supported/,
+test("parseCronExpr: */N expands to step value set", () => {
+  const p = parseCronExpr("*/15 * * * *");
+  assert.equal(p.minute.all, undefined);
+  assert.deepEqual(
+    Array.from((p.minute as { values: Set<number> }).values).sort((a, b) => a - b),
+    [0, 15, 30, 45],
   );
-  assert.throws(() => parseCronExpr("5 * * * *"), /Unsupported minute pattern/);
-  assert.throws(() => parseCronExpr("*/0 * * * *"), /Invalid/);
-  assert.throws(() => parseCronExpr("*/60 * * * *"), /Invalid/);
 });
+
+// ── P2-1: full cron parser coverage ────────────────────────────────────────
+
+test("parseCronExpr: exact-value fields (N)", () => {
+  const p = parseCronExpr("30 14 * * *");
+  assert.deepEqual(
+    Array.from((p.minute as { values: Set<number> }).values),
+    [30],
+  );
+  assert.deepEqual(
+    Array.from((p.hour as { values: Set<number> }).values),
+    [14],
+  );
+  assert.deepEqual(p.dayOfMonth, { all: true });
+});
+
+test("parseCronExpr: range fields (N-M)", () => {
+  const p = parseCronExpr("* 9-17 * * *");
+  assert.equal(p.minute.all, true);
+  assert.deepEqual(
+    Array.from((p.hour as { values: Set<number> }).values).sort((a, b) => a - b),
+    [9, 10, 11, 12, 13, 14, 15, 16, 17],
+  );
+});
+
+test("parseCronExpr: day-of-week range for weekdays (1-5)", () => {
+  const p = parseCronExpr("0 9 * * 1-5");
+  assert.deepEqual(
+    Array.from((p.dayOfWeek as { values: Set<number> }).values).sort(
+      (a, b) => a - b,
+    ),
+    [1, 2, 3, 4, 5],
+  );
+});
+
+test("parseCronExpr: list field (N,M,K)", () => {
+  const p = parseCronExpr("0,15,30,45 * * * *");
+  assert.deepEqual(
+    Array.from((p.minute as { values: Set<number> }).values).sort(
+      (a, b) => a - b,
+    ),
+    [0, 15, 30, 45],
+  );
+});
+
+test("parseCronExpr: list mixed with range (1-5,10,15-20)", () => {
+  const p = parseCronExpr("1-5,10,15-20 * * * *");
+  assert.deepEqual(
+    Array.from((p.minute as { values: Set<number> }).values).sort(
+      (a, b) => a - b,
+    ),
+    [1, 2, 3, 4, 5, 10, 15, 16, 17, 18, 19, 20],
+  );
+});
+
+test("parseCronExpr: step with range (0-30/5)", () => {
+  const p = parseCronExpr("0-30/5 * * * *");
+  assert.deepEqual(
+    Array.from((p.minute as { values: Set<number> }).values).sort(
+      (a, b) => a - b,
+    ),
+    [0, 5, 10, 15, 20, 25, 30],
+  );
+});
+
+test("parseCronExpr: rejects non-5-field expressions", () => {
+  assert.throws(() => parseCronExpr("* * *"), /expected 5 fields/);
+  assert.throws(() => parseCronExpr("* * * * * *"), /expected 5 fields/);
+});
+
+test("parseCronExpr: rejects out-of-range values", () => {
+  assert.throws(
+    () => parseCronExpr("60 * * * *"),
+    /Value "60" out of bounds/,
+  );
+  assert.throws(
+    () => parseCronExpr("* 24 * * *"),
+    /Value "24" out of bounds/,
+  );
+  assert.throws(
+    () => parseCronExpr("* * 0 * *"),
+    /Value "0" out of bounds/,
+  );
+  assert.throws(
+    () => parseCronExpr("* * * 13 *"),
+    /Value "13" out of bounds/,
+  );
+  assert.throws(
+    () => parseCronExpr("* * * * 7"),
+    /Value "7" out of bounds/,
+  );
+});
+
+test("parseCronExpr: rejects reversed range", () => {
+  assert.throws(
+    () => parseCronExpr("5-3 * * * *"),
+    /Reversed range "5-3"/,
+  );
+});
+
+test("parseCronExpr: rejects step=0", () => {
+  assert.throws(() => parseCronExpr("*/0 * * * *"), /must be >= 1/);
+});
+
+test("parseCronExpr: rejects step without * or N-M range", () => {
+  assert.throws(
+    () => parseCronExpr("5/2 * * * *"),
+    /must use "\*" or "N-M" form/,
+  );
+});
+
+test("parseCronExpr: rejects empty list item", () => {
+  assert.throws(() => parseCronExpr(",5 * * * *"), /Empty list item/);
+});
+
+// ── P2-1: isCronDue semantics across field resolutions ─────────────────────
 
 test("isCronDue: first call (lastFiredAt=null) always fires", () => {
   const parsed = parseCronExpr("* * * * *");
   assert.equal(isCronDue(parsed, null, new Date()), true);
 });
 
-test("isCronDue: same minute as last fire → does not fire", () => {
+test("isCronDue: same minute as last fire → does not fire (every-minute)", () => {
   const parsed = parseCronExpr("* * * * *");
   const now = new Date();
-  const lastFiredAt = new Date(now.getTime() - 1000).toISOString(); // 1s ago, same minute
+  const lastFiredAt = new Date(now.getTime() - 1000).toISOString();
   assert.equal(isCronDue(parsed, lastFiredAt, now), false);
 });
 
-test("isCronDue: */2 only fires on even minutes", () => {
+test("isCronDue: */2 fires on multiple-of-2 minutes with no prior fire", () => {
   const parsed = parseCronExpr("*/2 * * * *");
-  // At minute 0 (or any even minute) with no prior fire → fires
-  const evenMinute = new Date(2026, 6, 3, 10, 0, 0); // minute 0
+  const evenMinute = new Date(2026, 6, 3, 10, 0, 0);
   assert.equal(isCronDue(parsed, null, evenMinute), true);
 
-  // Same minute as last fire → no re-fire
   const sameMinute = new Date(2026, 6, 3, 10, 0, 30);
   assert.equal(
     isCronDue(parsed, evenMinute.toISOString(), sameMinute),
     false,
   );
+});
+
+test("isCronDue: hourly cron (0 * * * *) fires when hour changes", () => {
+  const parsed = parseCronExpr("0 * * * *");
+  const last = new Date(2026, 6, 3, 14, 30, 0);
+  const next = new Date(2026, 6, 3, 15, 0, 0);
+  assert.equal(isCronDue(parsed, last.toISOString(), next), true);
+
+  // Wrong minute → not cron match
+  const wrongMin = new Date(2026, 6, 3, 15, 30, 0);
+  assert.equal(isCronDue(parsed, last.toISOString(), wrongMin), false);
+
+  // Hour changed, minute matches → fire
+  const sameMinDiffHr = new Date(2026, 6, 3, 15, 0, 0);
+  assert.equal(
+    isCronDue(
+      parsed,
+      new Date(2026, 6, 3, 14, 0, 0).toISOString(),
+      sameMinDiffHr,
+    ),
+    true,
+  );
+});
+
+test("isCronDue: daily-at-specific-time cron (30 14 * * *) advances across days", () => {
+  const parsed = parseCronExpr("30 14 * * *");
+  const yesterday = new Date(2026, 6, 3, 14, 30, 0);
+  const today = new Date(2026, 6, 4, 14, 30, 0);
+  assert.equal(isCronDue(parsed, yesterday.toISOString(), today), true);
+
+  // Same day, same minute → don't fire
+  const sameDay = new Date(2026, 6, 3, 14, 30, 30);
+  assert.equal(isCronDue(parsed, yesterday.toISOString(), sameDay), false);
+
+  // Right time but wrong hour → not cron match
+  const wrongHour = new Date(2026, 6, 4, 13, 30, 0);
+  assert.equal(isCronDue(parsed, yesterday.toISOString(), wrongHour), false);
+});
+
+test("isCronDue: weekday cron (0 9 * * 1-5) fires only on weekdays", () => {
+  const parsed = parseCronExpr("0 9 * * 1-5");
+  const lastMon = new Date(2026, 6, 6, 9, 0, 0);
+
+  // Tue 09:00 → fire (dow=2 in 1-5, hour=9, minute=0, day changed)
+  const tue = new Date(2026, 6, 7, 9, 0, 0);
+  assert.equal(isCronDue(parsed, lastMon.toISOString(), tue), true);
+
+  // Sat 09:00 → don't fire (dow=6 NOT in 1-5)
+  const sat = new Date(2026, 6, 11, 9, 0, 0);
+  assert.equal(isCronDue(parsed, lastMon.toISOString(), sat), false);
+});
+
+test("isCronDue: monthly-first-day cron (0 0 1 * *) advances across months", () => {
+  const parsed = parseCronExpr("0 0 1 * *");
+  const jun1 = new Date(2026, 5, 1, 0, 0, 0);
+  const jul1 = new Date(2026, 6, 1, 0, 0, 0);
+  assert.equal(isCronDue(parsed, jun1.toISOString(), jul1), true);
+
+  const sameMin = new Date(2026, 5, 1, 0, 0, 30);
+  assert.equal(isCronDue(parsed, jun1.toISOString(), sameMin), false);
+});
+
+// ── P2-1: integration smoke (real cron pattern, real tick) ────────────────
+
+test("P2-1 integration: schedule */5 14 * * * cron fires via tick", () => {
+  const defId = seedDefinition("ws_p21", "p21-test", SIMPLE_DEF);
+  registerScheduledWorkflow({
+    id: "sw_p21",
+    workspaceId: "ws_p21",
+    definitionId: defId,
+    cronExpr: "*/5 14 * * *",
+    enabled: true,
+    inputJson: { tag: "p21-smoke" },
+    lastFiredAt: null,
+  });
+
+  tick();
+
+  const instances = listWorkflowInstancesForWorkspaceSync("ws_p21");
+  assert.equal(instances.length, 1, "tick fires schedule (lastFiredAt null)");
+  assert.equal(instances[0].currentState, "idle");
+  assert.deepEqual(instances[0].contextJson, { tag: "p21-smoke" });
 });
