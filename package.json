@@ -10,6 +10,11 @@
     "test:persistence": "node --experimental-strip-types --test packages/services/src/workflows/persistence.test.ts",
     "test:runtime": "node --experimental-strip-types --test packages/services/src/workflows/runtime.test.ts",
     "test:store": "node --experimental-strip-types --test packages/services/src/workflows/store.test.ts",
-    "test:all": "node --experimental-strip-types --test packages/services/src/workflows/persistence.test.ts packages/services/src/workflows/store.test.ts packages/services/src/workflows/runtime.test.ts"
+    "test:daemon": "node --experimental-strip-types --test packages/daemon/src/handle-workflow-task.test.ts",
+    "test:scheduler": "node --experimental-strip-types --test packages/services/src/schedules/scheduler.test.ts",
+    "test:e2e": "node --experimental-strip-types --test packages/services/src/workflows/e2e.test.ts",
+    "test:web": "node --experimental-strip-types --experimental-test-module-mocks --test apps/web/app/workflows/__tests__/actions.test.ts apps/web/app/workflows/__tests__/page.test.ts",
+    "test:cli": "node --experimental-strip-types --test apps/cli/src/workflow.test.ts",
+    "test:all": "node --experimental-strip-types --experimental-test-module-mocks --test packages/services/src/workflows/persistence.test.ts packages/services/src/workflows/store.test.ts packages/services/src/workflows/runtime.test.ts packages/daemon/src/handle-workflow-task.test.ts packages/services/src/schedules/scheduler.test.ts packages/services/src/workflows/e2e.test.ts apps/web/app/workflows/__tests__/actions.test.ts apps/web/app/workflows/__tests__/page.test.ts apps/cli/src/workflow.test.ts"
   }
 }
