@@ -1,41 +1,78 @@
-// FSM L4.1 — Task type definitions for the daemon test.
+// FSM P2-2 — Task type definitions for the daemon test.
 //
-// The daemon's job is to take a task (one row of agent_task_queue in the
-// prod schema) and execute it. For the L4.1 close-out we support two
-// task types: "workflow" (create + advance a workflow instance) and
-// "noop" (placeholder for tasks that don't need FSM execution).
+// The daemon's job is to take a task (one row of agent_task_queue in
+// the prod schema) and execute it. We support a small set of task
+// types:
 //
-// Real production tasks will be richer (notify-channel, invoke-agent,
-// update-doc, etc., per the L4 brief in fsm-step-2-runbook.md). For
-// now we keep the surface minimal: a workflow task is the only one
-// that touches the FSM runtime.
+//   - "workflow"        (L4.1)  create + advance a workflow instance
+//   - "noop"            (L4.1)  placeholder for tasks that don't need
+//                               any handler logic
+//   - "update-doc"      (P2-2)  write content to a workspace-scoped
+//                               document (file in .data/docs/)
+//   - "notify-channel"  (P2-2)  send a message to a channel — stub
+//                               via console.log + deliveryId
+//   - "invoke-agent"    (P2-2)  prompt an LLM-backed agent — echo
+//                               stub here, real backend wired in prod
+//
+// Real production tasks (per the L4 brief in fsm-step-2-runbook.md)
+// will be richer still; for the P2-2 close-out we cover the three
+// handlers commonly needed alongside FSM workflow firing so the
+// scheduler can drive a realistic pipeline.
 
-export type TaskType = "workflow" | "noop";
+export type TaskType =
+  | "workflow"
+  | "noop"
+  | "update-doc"
+  | "notify-channel"
+  | "invoke-agent";
 
 /**
- * Generic task input. The daemon dispatches on `taskType`; fields below
- * are only meaningful for "workflow" tasks but kept at the top level
- * for ergonomic call sites.
+ * Generic task input. The daemon dispatches on `taskType`; field
+ * presence below depends on the type. Workflow fields stay at the top
+ * level for the L4.1 ergonomic call sites; new types add their own
+ * fields here.
  */
 export interface TaskInput {
   workspaceId: string;
   taskType: TaskType;
-  /** workflow taskType only */
+
+  // ── workflow fields (L4.1) ─────────────────────────────────────────
+  /** workflow only */
   definitionId?: string;
-  /** workflow taskType only — when present, advance existing instance */
+  /** workflow only — when present, advance existing instance */
   instanceId?: string;
-  /** workflow taskType only — channel/contact routing metadata */
+  /** workflow only — channel/contact routing metadata */
   channelName?: string;
   contactId?: string;
-  /** workflow taskType only — initial contextJson for new instances */
+  /** workflow only — initial contextJson for new instances */
   inputJson?: Record<string, unknown>;
-  /** workflow taskType only — event to fire on the instance */
+  /** workflow only — event to fire on the instance */
   event?: WorkflowEventSpec;
+
+  // ── update-doc fields (P2-2) ───────────────────────────────────────
+  /** update-doc only — logical document id within the workspace */
+  docId?: string;
+  /** update-doc only — body to write */
+  content?: string;
+  /** update-doc only — file extension hint; default "json" */
+  format?: "json" | "text" | "markdown";
+
+  // ── notify-channel fields (P2-2) ───────────────────────────────────
+  /** notify-channel only — channel name (e.g. "im_default") */
+  channel?: string;
+  /** notify-channel only — message body to deliver */
+  message?: string;
+
+  // ── invoke-agent fields (P2-2) ─────────────────────────────────────
+  /** invoke-agent only — target agent id (e.g. "as-manager") */
+  agentId?: string;
+  /** invoke-agent only — prompt to send to the agent */
+  prompt?: string;
 }
 
 /**
  * Event spec the daemon translates into a runtime WorkflowEvent.
- * We keep this surface tight: START or SIGNAL. CALLBACK/TIMEOUT/CANCEL
+ * Workflow type only. Tight: START or SIGNAL. CALLBACK/TIMEOUT/CANCEL
  * are out of scope for L4.1.
  */
 export interface WorkflowEventSpec {
@@ -49,7 +86,7 @@ export interface WorkflowEventSpec {
 export interface TaskOutput {
   ok: boolean;
   taskType: TaskType;
-  /** workflow: the workflow result. noop: undefined. */
+  /** Handler-specific result; shape depends on taskType. */
   result?: unknown;
   error?: string;
 }
