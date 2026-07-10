@@ -16,9 +16,12 @@ import {
   loadInstanceDetail,
   createWorkflowDefinition,
   advanceInstance,
+  queryWorkflowHistory,
   type CreateWorkflowInput,
   type AdvanceInstanceInput,
   type AdvanceInstanceResult,
+  type HistoryQueryOptions,
+  type HistoryQueryResult,
 } from "./loader.ts";
 import type {
   WorkflowDefinitionRecord,
@@ -54,14 +57,26 @@ export async function advanceInstanceAction(
   return advanceInstance(input);
 }
 
+// ── P2-5 — History query action ───────────────────────────────────
+
+export async function queryHistoryAction(
+  instanceId: string,
+  options: HistoryQueryOptions = {},
+): Promise<HistoryQueryResult> {
+  return queryWorkflowHistory(instanceId, options);
+}
+
 // ── Re-exports so test files can avoid an extra hop through loader.ts ───────
 
 export {
   loadDefinitionDetail,
   loadInstanceDetail,
+  queryWorkflowHistory,
 };
 export type {
   CreateWorkflowInput,
   AdvanceInstanceInput,
   AdvanceInstanceResult,
+  HistoryQueryOptions,
+  HistoryQueryResult,
 };

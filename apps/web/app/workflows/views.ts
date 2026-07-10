@@ -245,3 +245,185 @@ export function renderInstanceDetailView(input: {
     ]),
   ]);
 }
+// ── P2-5 — History rendering with search/filter/pagination ────────────────
+//
+// L4.3's renderInstanceDetailView renders history as a flat ol list.
+// P2-5 splits history rendering into its own helper so the same
+// function can be reused by the server, RSC, or any future tooling,
+// and so we can keep the original renderInstanceDetailView untouched
+// for backward compat (existing page.test.ts / actions.test.ts use it).
+
+import type { HistoryQueryResult } from "./loader.ts";
+
+export interface HistoryViewFilters {
+  eventType?: string;
+  searchText?: string;
+}
+
+export function renderHistorySection(input: {
+  historyResult: HistoryQueryResult;
+  filters: HistoryViewFilters;
+  instanceId: string;
+}): HNode {
+  const { historyResult: r, filters, instanceId } = input;
+  const start = r.totalCount === 0 ? 0 : r.offset + 1;
+  const end = r.offset + r.rows.length;
+
+  const children: HNode[] = [];
+
+  // ── filter chips (what's active) ─────────────────────────────────────
+  const activeFilters: HNode[] = [];
+  if (filters.eventType) {
+    activeFilters.push(
+      h("span", { "data-testid": "history-filter-event-type-chip" }, [
+        `event: ${filters.eventType}`,
+      ]),
+    );
+  }
+  if (filters.searchText && filters.searchText.length > 0) {
+    activeFilters.push(
+      h("span", { "data-testid": "history-filter-search-chip" }, [
+        `search: "${filters.searchText}"`,
+      ]),
+    );
+  }
+  if (activeFilters.length > 0) {
+    children.push(
+      h("div", { "data-testid": "history-active-filters" }, activeFilters),
+    );
+  }
+
+  // ── count + rows ──────────────────────────────────────────────────────
+  if (r.rows.length === 0) {
+    children.push(
+      h("p", { "data-testid": "history-empty" }, [
+        r.totalCount === 0
+          ? "No history rows yet."
+          : "No rows match the current filter.",
+      ]),
+    );
+  } else {
+    children.push(
+      h(
+        "ol",
+        { "data-testid": "history-paginated-list" },
+        r.rows.map((row) =>
+          h("li", {
+            key: row.id,
+            "data-testid": `history-row-${row.id}`,
+          }, [
+            `${row.createdAt} — ${row.eventType}: ${row.fromState ?? "(start)"} → ${row.toState ?? "(none)"}`,
+          ]),
+        ),
+      ),
+    );
+  }
+
+  // ── footer (pagination) ──────────────────────────────────────────────
+  const prevOffset = Math.max(0, r.offset - r.pageSize);
+  const nextOffset = r.offset + r.pageSize;
+  const prevDisabled = r.offset === 0;
+  const nextDisabled = !r.hasMore;
+
+  const pagination: HNode[] = [
+    h(
+      "a",
+      {
+        href: buildHistoryHref(instanceId, filters, prevOffset),
+        "data-testid": "history-prev",
+        ...(prevDisabled ? { "aria-disabled": "true" } : {}),
+      },
+      ["← Previous"],
+    ),
+    h("span", { "data-testid": "history-count" }, [
+      `Showing ${start}-${end} of ${r.totalCount}`,
+    ]),
+    h(
+      "a",
+      {
+        href: buildHistoryHref(instanceId, filters, nextOffset),
+        "data-testid": "history-next",
+        ...(nextDisabled ? { "aria-disabled": "true" } : {}),
+      },
+      ["Next →"],
+    ),
+  ];
+  children.push(
+    h("div", { "data-testid": "history-pagination" }, pagination),
+  );
+
+  return h("section", { "data-testid": "history-section" }, children);
+}
+
+function buildHistoryHref(
+  instanceId: string,
+  filters: HistoryViewFilters,
+  offset: number,
+): string {
+  const params = new URLSearchParams();
+  if (filters.eventType) params.set("eventType", filters.eventType);
+  if (filters.searchText) params.set("searchText", filters.searchText);
+  if (offset > 0) params.set("offset", String(offset));
+  const qs = params.toString();
+  return `/workflows/instances/${instanceId}${qs ? `?${qs}` : ""}`;
+}
+
+// ── V2 instance detail view that takes a HistoryQueryResult ────────────
+//
+// Sibling to renderInstanceDetailView (L4.3). Renderers stay parallel:
+// V2 calls renderHistorySection with the query result; L4.3 keeps the
+// flat ol list. Both can be tested independently.
+
+export function renderInstanceDetailViewV2(input: {
+  instance: WorkflowInstanceRecord | null;
+  definition: WorkflowDefinitionRecord | null;
+  historyResult: HistoryQueryResult;
+  filters: HistoryViewFilters;
+}): HNode {
+  if (!input.instance) {
+    return h("div", { "data-testid": "instance-not-found" }, [
+      h("h1", {}, ["Instance not found"]),
+    ]);
+  }
+  const inst = input.instance;
+  return h("div", { class: "instance-detail" }, [
+    h("h1", {}, [`Instance ${inst.id}`]),
+    h("dl", { "data-testid": "instance-meta" }, [
+      h("dt", {}, ["ID"]),
+      h("dd", { "data-testid": "instance-id" }, [inst.id]),
+      h("dt", {}, ["Definition"]),
+      h("dd", {}, [
+        h(
+          "a",
+          {
+            href: input.definition
+              ? `/workflows/${input.definition.id}`
+              : "#",
+          },
+          [inst.definitionId],
+        ),
+      ]),
+      h("dt", {}, ["Workspace"]),
+      h("dd", {}, [inst.workspaceId]),
+      h("dt", {}, ["Current state"]),
+      h("dd", { "data-testid": "instance-current-state" }, [
+        inst.currentState,
+      ]),
+      h("dt", {}, ["Status"]),
+      h("dd", { "data-testid": "instance-status" }, [inst.status]),
+      h("dt", {}, ["Attempts"]),
+      h("dd", { "data-testid": "instance-attempts" }, [
+        String(inst.attemptCount),
+      ]),
+      h("dt", {}, ["Created"]),
+      h("dd", {}, [inst.createdAt]),
+      h("dt", {}, ["Updated"]),
+      h("dd", {}, [inst.updatedAt]),
+    ]),
+    renderHistorySection({
+      historyResult: input.historyResult,
+      filters: input.filters,
+      instanceId: inst.id,
+    }),
+  ]);
+}

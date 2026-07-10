@@ -300,3 +300,69 @@ function buildRuntimeInstance(
 // ── Re-exports for test convenience ─────────────────────────────────────────
 
 export { createWorkflowInstanceSync };
+// ── P2-5 — Workflow history search/filter/pagination ─────────────
+//
+// L4.3 had `loadInstanceDetail()` returning the full history list. P2-5
+// adds a query API that supports:
+//   - eventType exact-match filter (e.g. only "guard_fail" rows)
+//   - searchText case-insensitive substring across eventType /
+//     fromState / toState / stringified payloadJson
+//   - pageSize + offset pagination (default 50 / 0)
+//
+// Returns rows + totalCount (pre-pagination) + hasMore so callers
+// can render "Showing X-Y of Z" footers and pagination buttons.
+// Filtering happens in JS (not SQL LIKE) because the test repo uses
+// node:sqlite without a schema-wide LIKE helper; this keeps the
+// loader portable and avoids Lua/SQL branches between test + prod.
+
+import type { WorkflowHistoryRecord as WorkflowHistoryRecordType } from "@agent-space/db";
+
+export interface HistoryQueryOptions {
+  eventType?: string;
+  searchText?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export interface HistoryQueryResult {
+  rows: WorkflowHistoryRecordType[];
+  totalCount: number;
+  pageSize: number;
+  offset: number;
+  hasMore: boolean;
+}
+
+export function queryWorkflowHistory(
+  instanceId: string,
+  options: HistoryQueryOptions = {},
+): HistoryQueryResult {
+  const pageSize = options.limit ?? 50;
+  const offset = options.offset ?? 0;
+
+  const all = listWorkflowHistorySync(instanceId);
+
+  let filtered = all;
+  if (options.eventType) {
+    const want = options.eventType;
+    filtered = filtered.filter((r) => r.eventType === want);
+  }
+  if (options.searchText && options.searchText.length > 0) {
+    const q = options.searchText.toLowerCase();
+    filtered = filtered.filter((r) => {
+      const haystack = [
+        r.eventType,
+        r.fromState ?? "",
+        r.toState ?? "",
+        JSON.stringify(r.payloadJson ?? {}),
+      ]
+        .join(" ")
+        .toLowerCase();
+      return haystack.includes(q);
+    });
+  }
+
+  const totalCount = filtered.length;
+  const rows = filtered.slice(offset, offset + pageSize);
+  const hasMore = offset + rows.length < totalCount;
+  return { rows, totalCount, pageSize, offset, hasMore };
+}

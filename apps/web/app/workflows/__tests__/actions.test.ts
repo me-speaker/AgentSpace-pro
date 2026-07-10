@@ -635,3 +635,160 @@ test("loadInstanceDetail returns null fields when instance is missing", async ()
   assert.equal(data.definition, null);
   assert.deepEqual(data.history, []);
 });
+// ── P2-5 — queryWorkflowHistory + queryHistoryAction ────────────────────────
+//
+// IMPORTANT: must NOT add a module-level `import from "../actions.ts"`
+// here — ESM `import` statements hoist ABOVE all top-level code, so
+// they would run BEFORE the `mock.module(...)` registrations above
+// and get an unmocked module. All access to actions.ts happens via
+// `await import("../actions.ts")` inside each test, matching the
+// existing pattern in the file.
+
+function seedInstanceWithHistory(
+  instId: string,
+  defId: string,
+  rows: Array<{
+    eventType: string;
+    fromState: string | null;
+    toState: string | null;
+    payloadJson?: Record<string, unknown>;
+  }>,
+): void {
+  const instRec: MockInstRecord = {
+    id: instId,
+    workspaceId: "ws_p25",
+    definitionId: defId,
+    status: "active",
+    currentState: "idle",
+    contextJson: {},
+    attemptCount: 0,
+    deadlineAt: null,
+    callbackToken: null,
+    createdAt: nowIso(),
+    updatedAt: nowIso(),
+  };
+  state.instances.set(instRec.id, instRec);
+  for (const [i, r] of rows.entries()) {
+    const histRec: MockHistoryRecord = {
+      id: `wfh_p25_${i + 1}`,
+      workspaceId: "ws_p25",
+      instanceId: instId,
+      eventType: r.eventType,
+      fromState: r.fromState,
+      toState: r.toState,
+      payloadJson: r.payloadJson ?? {},
+      createdAt: nowIso(),
+    };
+    state.history.push(histRec);
+  }
+}
+
+test("P2-5 queryWorkflowHistory: returns all rows + pagination metadata when no filter", async () => {
+  seedInstanceWithHistory("wfi_p25_a", "wfd_p25_a", [
+    { eventType: "START", fromState: null, toState: "idle" },
+    { eventType: "finish", fromState: "idle", toState: "done" },
+    { eventType: "guard_fail", fromState: "done", toState: null, payloadJson: { reason: "missing_word" } },
+  ]);
+
+  const { queryWorkflowHistory } = await import("../actions.ts");
+  const r = queryWorkflowHistory("wfi_p25_a");
+  assert.equal(r.totalCount, 3);
+  assert.equal(r.rows.length, 3);
+  assert.equal(r.pageSize, 50);
+  assert.equal(r.offset, 0);
+  assert.equal(r.hasMore, false);
+});
+
+test("P2-5 queryWorkflowHistory: filter by eventType exact match", async () => {
+  seedInstanceWithHistory("wfi_p25_b", "wfd_p25_b", [
+    { eventType: "START", fromState: null, toState: "idle" },
+    { eventType: "guard_fail", fromState: "idle", toState: null, payloadJson: { reason: "x" } },
+    { eventType: "guard_fail", fromState: "idle", toState: null, payloadJson: { reason: "y" } },
+  ]);
+
+  const { queryWorkflowHistory } = await import("../actions.ts");
+  const r = queryWorkflowHistory("wfi_p25_b", { eventType: "guard_fail" });
+  assert.equal(r.totalCount, 2);
+  assert.equal(r.rows.length, 2);
+  for (const row of r.rows) {
+    assert.equal(row.eventType, "guard_fail");
+  }
+});
+
+test("P2-5 queryWorkflowHistory: searchText matches across eventType + states + payloadJson", async () => {
+  seedInstanceWithHistory("wfi_p25_c", "wfd_p25_c", [
+    { eventType: "START", fromState: null, toState: "idle" },
+    { eventType: "advance", fromState: "idle", toState: "draft", payloadJson: { word_count: 1500 } },
+    { eventType: "submit", fromState: "draft", toState: "review" },
+  ]);
+
+  const { queryWorkflowHistory } = await import("../actions.ts");
+
+  // search by eventType
+  let r = queryWorkflowHistory("wfi_p25_c", { searchText: "advance" });
+  assert.equal(r.totalCount, 1);
+
+  // search by payload JSON value
+  r = queryWorkflowHistory("wfi_p25_c", { searchText: "1500" });
+  assert.equal(r.totalCount, 1);
+
+  // search by state name
+  r = queryWorkflowHistory("wfi_p25_c", { searchText: "review" });
+  assert.equal(r.totalCount, 1);
+
+  // case-insensitive
+  r = queryWorkflowHistory("wfi_p25_c", { searchText: "ADVANCE" });
+  assert.equal(r.totalCount, 1);
+});
+
+test("P2-5 queryWorkflowHistory: pagination with limit + offset", async () => {
+  const rows = Array.from({ length: 75 }, (_, i) => ({
+    eventType: `tick_${i}`,
+    fromState: "a",
+    toState: "b",
+  }));
+  seedInstanceWithHistory("wfi_p25_d", "wfd_p25_d", rows);
+
+  const { queryWorkflowHistory } = await import("../actions.ts");
+
+  // first page (default pageSize=50)
+  let r = queryWorkflowHistory("wfi_p25_d");
+  assert.equal(r.totalCount, 75);
+  assert.equal(r.rows.length, 50);
+  assert.equal(r.hasMore, true);
+
+  // last page
+  r = queryWorkflowHistory("wfi_p25_d", { offset: 50 });
+  assert.equal(r.totalCount, 75);
+  assert.equal(r.rows.length, 25);
+  assert.equal(r.hasMore, false);
+
+  // custom pageSize
+  r = queryWorkflowHistory("wfi_p25_d", { limit: 10, offset: 20 });
+  assert.equal(r.totalCount, 75);
+  assert.equal(r.rows.length, 10);
+  assert.equal(r.hasMore, true);
+});
+
+test("P2-5 queryHistoryAction: server action wraps the loader", async () => {
+  seedInstanceWithHistory("wfi_p25_e", "wfd_p25_e", [
+    { eventType: "START", fromState: null, toState: "idle" },
+    { eventType: "X", fromState: "idle", toState: "x_done" },
+    { eventType: "X", fromState: "x_done", toState: "x_done2" },
+  ]);
+  const { queryHistoryAction } = await import("../actions.ts");
+  const r = await queryHistoryAction("wfi_p25_e", { eventType: "X" });
+  assert.equal(r.totalCount, 2);
+  assert.equal(r.rows.length, 2);
+  for (const row of r.rows) {
+    assert.equal(row.eventType, "X");
+  }
+});
+
+test("P2-5 queryWorkflowHistory: empty instanceId returns empty result", async () => {
+  const { queryWorkflowHistory } = await import("../actions.ts");
+  const r = queryWorkflowHistory("wfi_nonexistent");
+  assert.equal(r.totalCount, 0);
+  assert.equal(r.rows.length, 0);
+  assert.equal(r.hasMore, false);
+});
